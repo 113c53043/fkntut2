@@ -25,3 +25,8 @@ __pycache__/
 .DS_Store        # macOS
 Thumbs.db        # Windows
 *.swp            # Vim swap files
+
+
+# 忽略模型權重資料夾
+weights/
+gpt2/
