@@ -6,9 +6,9 @@ import time
 import numpy as np
 import re
 import shutil 
-from collections import defaultdict # 【新增】導入 defaultdict
+from collections import defaultdict
 
-# === 1. 路徑設定 (模仿 alice_gen.py / bob_extract.py) ===
+# === 1. 路徑設定 ===
 CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
 PARENT_DIR = os.path.dirname(CURRENT_DIR) # 獲取上一層目錄 (即 MAS_GRDH_PATH)
 
@@ -31,12 +31,10 @@ except ImportError as e:
 # === 3. 路徑設定 (使用 PARENT_DIR 作為根目錄) ===
 MAS_GRDH_PATH = PARENT_DIR 
 
-# 【路徑修正】請確保這些路徑對您當前的環境是正確的
 CKPT_PATH = "/home/vcpuser/netdrive/Workspace/st/mas_GRDH/weights/v1-5-pruned.ckpt"
 GPT2_PATH = "/nfs/Workspace/st/mas_GRDH/gpt2"
 CONFIG_PATH = os.path.join(MAS_GRDH_PATH, "configs/stable-diffusion/ldm.yaml")
 
-# 【修改】: 這是 txt2img.py 需要的 prompt 列表
 PROMPT_FILE_LIST = os.path.join(MAS_GRDH_PATH, "text_prompt_dataset", "test_dataset.txt")
 TXT2IMG_SCRIPT = os.path.join(MAS_GRDH_PATH, "scripts", "txt2img.py")
 
@@ -45,7 +43,6 @@ BOB_SCRIPT = os.path.join(MAS_GRDH_PATH, "scripts", "bob_extract.py")
 OUTPUT_DIR = os.path.join(MAS_GRDH_PATH, "outputs", "robust_test_results")
 
 # === 4. 定義魯棒性測試套件 ===
-# (您可以隨意擴展這裡的因子)
 ATTACK_SUITE = [
     (identity, [None], "1_Identity_Control", ".png"),
     (storage, [None], "2_Storage_Save_Load", ".png"),
@@ -56,11 +53,9 @@ ATTACK_SUITE = [
     (awgn, [0.01, 0.05, 0.10], "7_Gaussian_Noise", ".png"), 
 ]
 
-# === 5. 輔助函數 (run_alice_once, run_bob_once, run_txt2img_test) ===
-# (這三個函數與上一版相同，不變)
+# === 5. 輔助函數 ===
 
 def run_alice_once(text_sys, prompt, session_key, clean_stego_path):
-    # (修改：接收 clean_stego_path 作為參數)
     print(f"\n--- [Alice Base Run] Key: {session_key} Prompt: '{prompt[:50]}...' ---")
     
     try:
@@ -91,7 +86,7 @@ def run_alice_once(text_sys, prompt, session_key, clean_stego_path):
 def run_bob_once(img_path, stego_prompt_text, session_key):
     """
     在指定的圖像上執行一次 Bob 提取流程。
-    返回一個包含準確率的字符串 (例如 "100.00%" 或 "80.50%")
+    返回一個包含準確率的字符串 (例如 "100.00%" 或 "86.50%")
     """
     cmd_bob = [
         sys.executable, BOB_SCRIPT,
@@ -105,18 +100,20 @@ def run_bob_once(img_path, stego_prompt_text, session_key):
     try:
         result_bob = subprocess.run(cmd_bob, check=True, cwd=MAS_GRDH_PATH, capture_output=True, text=True, timeout=300)
         
-        match = re.search(r"📊 Payload Byte Accuracy: (\d+\.\d+)%", result_bob.stdout)
+        # 【更新】Regex 同時匹配 Bit 或 Byte Accuracy
+        match = re.search(r"📊 Payload (?:Bit|Byte) Accuracy: (\d+\.\d+)%", result_bob.stdout)
         if match:
-            return f"{match.group(1)}%" # 返回 "XX.XX%"
+            return f"{match.group(1)}%" 
+            
         if "N/A (No Ground Truth)" in result_bob.stdout:
-            print("⚠️ [Bob] 找不到 .npy 驗證文件 (這不應該發生)")
+            print("⚠️ [Bob] 找不到 .npy 驗證文件")
             return "N/A (No .npy)"
         print("[Bob STDOUT DUMP]:\n" + result_bob.stdout[-500:]) 
         return "0.0% (Parse Fail)"
             
     except subprocess.CalledProcessError as e:
         print(f"❌ Bob 圖像提取失敗:\n{e.stderr[-1000:]}")
-        match = re.search(r"📊 Payload Byte Accuracy: (\d+\.\d+)%", e.stdout)
+        match = re.search(r"📊 Payload (?:Bit|Byte) Accuracy: (\d+\.\d+)%", e.stdout)
         if match:
             return f"{match.group(1)}% (Exec Fail)"
         return "0.0% (Exec Fail)"
@@ -155,26 +152,23 @@ def run_txt2img_test(attack_name_str, factor, single_prompt_file_path):
         "--attack_factor", factor_arg,
         "--mapping_func", "ours_mapping",
         "--seed", "42",
+        "--quiet" # 使用靜默模式減少輸出
     ]
     
     try:
-        # cwd 必須是 CURRENT_DIR (即 scripts/)
         result_txt2img = subprocess.run(cmd_txt2img, check=True, cwd=CURRENT_DIR, 
                                         capture_output=True, text=True, timeout=600) 
         
         output = result_txt2img.stdout
-        
         match = re.search(r"average accuracy: (\d+\.\d+)", output) 
         if match:
             try:
-                acc_ratio = float(match.group(1)) # 獲取 "0.9903..."
-                accuracy = f"{acc_ratio * 100:.2f}%" # 轉換為 "99.04%"
+                acc_ratio = float(match.group(1))
+                accuracy = f"{acc_ratio * 100:.2f}%"
                 return accuracy
             except Exception as e:
-                print(f"❌ txt2img 解析浮點數失敗: {e}")
                 return "0.0% (Float Parse Fail)"
         else:
-            print(f"[txt2img DUMP]: {output[-500:]}")
             return "0.0% (Regex Parse Fail)"
             
     except subprocess.CalledProcessError as e:
@@ -183,14 +177,11 @@ def run_txt2img_test(attack_name_str, factor, single_prompt_file_path):
     except subprocess.TimeoutExpired:
         print("❌ txt2img 執行超時。")
         return "0.0% (Timeout)"
-    except Exception as e:
-        print(f"❌ txt2img 發生未知錯誤: {e}")
-        return "0.0% (Unknown Fail)"
 
-# === 6. 【重構】的主測試循環 ===
+# === 6. 主測試循環 ===
 
 def main():
-    print("🚀 魯棒性 (Robustness) 系統性測試腳本啟動 🚀")
+    print("🚀 魯棒性 (Robustness) 系統性測試腳本啟動 (Bit Accuracy Mode) 🚀")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     # --- 系統檢查 ---
@@ -212,7 +203,6 @@ def main():
     print(f"[System] 使用設備: {device}")
     
     text_sys = TextStegoSystem(model_name=GPT2_PATH)
-
     results_summary = defaultdict(lambda: ([], []))
     
     # --- 循環測試所有 Prompts ---
@@ -257,15 +247,12 @@ def main():
         for attack_func, factors, attack_name, file_ext in ATTACK_SUITE:
             for factor in factors:
                 
-                # --- 【關鍵修正】: 將 'N/A' 改為 'NA' ---
                 factor_str = str(factor) if factor is not None else 'NA' 
                 attack_key = f"{attack_name} (Factor: {factor_str})"
                 
                 print(f"\n--- [TEST] 攻擊: {attack_key} ---")
                 
-                # 使用修復後的 factor_str
                 attacked_img_base_path = os.path.join(OUTPUT_DIR, f"prompt_{i:03d}_attacked_{attack_name}_{factor_str}")
-                # --- 【修正結束】 ---
                 
                 # [Attack]
                 try:
@@ -276,8 +263,8 @@ def main():
                     )
                 except Exception as e:
                     print(f"❌ [Attack] 應用攻擊 {attack_name} 失敗: {e}")
-                    results_summary[attack_key][0].append(0.0) # 記錄 0%
-                    results_summary[attack_key][1].append(0.0) # 記錄 0%
+                    results_summary[attack_key][0].append(0.0) 
+                    results_summary[attack_key][1].append(0.0) 
                     continue
 
                 bob_target_path = f"{attacked_img_base_path}{file_ext}"
@@ -292,20 +279,20 @@ def main():
                     print(f"❌ [System] 複製驗證文件失敗: {e}")
                     continue
 
-                # --- 測試 1: 雙模態 (Dual-Modal) 系統 (Alice/Bob) ---
+                # --- 測試 1: 雙模態 (Bit Acc) ---
                 dual_modal_acc_str = run_bob_once(bob_target_path, stego_prompt_text, base_session_key)
-                print(f"  [RESULT 1/2] 雙模態 (Ours): {dual_modal_acc_str}")
+                print(f"  [RESULT 1/2] 雙模態 (Ours, Bit Acc): {dual_modal_acc_str}")
                 
-                # --- 測試 2: 純圖像 (Image-Only) 系統 (txt2img.py) ---
+                # --- 測試 2: 純圖像 (Bit Acc) ---
                 txt2img_acc_str = run_txt2img_test(attack_name, factor, single_prompt_file_path)
-                print(f"  [RESULT 2/2] 純圖像 (txt2img.py): {txt2img_acc_str}")
+                print(f"  [RESULT 2/2] 純圖像 (txt2img.py, Bit Acc): {txt2img_acc_str}")
 
-                # --- 儲存結果 (浮點數) ---
+                # --- 儲存結果 ---
                 try:
                     results_summary[attack_key][0].append(float(dual_modal_acc_str.replace('%', '')))
                     results_summary[attack_key][1].append(float(txt2img_acc_str.replace('%', '')))
                 except (ValueError, TypeError):
-                    results_summary[attack_key][0].append(0.0) # 處理 "N/A" 或 "Parse Fail"
+                    results_summary[attack_key][0].append(0.0)
                     results_summary[attack_key][1].append(0.0)
                 
                 time.sleep(1) 
@@ -315,19 +302,18 @@ def main():
     print(f"📊 魯棒性測試最終報告 (在 {len(prompts_to_test)} 個 Prompts 上的平均結果)")
     print("="*85)
     
-    print(f"{'Attack Type & Factor'.ljust(35)} | {'Dual-Modal (Avg. Payload Acc.)'.ljust(30)} | {'Image-Only (Avg. Raw Bit Acc.)'.ljust(25)}")
+    # 【更新】表頭
+    print(f"{'Attack Type & Factor'.ljust(35)} | {'Dual-Modal (Avg. Bit Acc.)'.ljust(30)} | {'Image-Only (Avg. Raw Bit Acc.)'.ljust(25)}")
     print("-" * 90)
     
-    # 為了排序，重新遍歷 ATTACK_SUITE
     for _, factors, attack_name, _ in ATTACK_SUITE:
         for factor in factors:
-            # --- 【關鍵修正】: 將 'N/A' 改為 'NA' ---
             factor_str = str(factor) if factor is not None else 'NA'
             attack_key = f"{attack_name} (Factor: {factor_str})"
             
             dual_modal_results, txt2img_results = results_summary[attack_key]
             
-            if not dual_modal_results: # 如果一次都沒跑成功
+            if not dual_modal_results:
                 avg_dual_modal = "N/A"
                 avg_txt2img = "N/A"
             else:

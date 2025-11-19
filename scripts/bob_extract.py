@@ -17,13 +17,11 @@ try:
     from ldm.util import instantiate_from_config
     from ldm.models.diffusion.dpm_solver import DPMSolverSampler
     import mapping_module
-    # 移除 hamming_decode_stream 的導入
 except ImportError as e:
     print(f"❌ [Bob] 導入失敗: {e}")
     sys.exit(1)
 
 def load_model_from_config(config, ckpt, device):
-    # ... (函數內容不變) ...
     pl_sd = torch.load(ckpt, map_location="cpu", weights_only=False)
     sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
@@ -33,7 +31,6 @@ def load_model_from_config(config, ckpt, device):
     return model
 
 def load_img(path):
-    # ... (函數內容不變) ...
     image = Image.open(path).convert("RGB")
     w, h = image.size
     if w != 512 or h != 512: 
@@ -45,8 +42,6 @@ def load_img(path):
 def repetition_decode_soft(soft_bits, rep_factor=3):
     """
     軟判決重複碼解碼器
-    soft_bits: 包含浮點數的一維 numpy 陣列
-    rep_factor: 重複因子 (例如 3)
     """
     # 確保長度是 rep_factor 的倍數
     if len(soft_bits) % rep_factor != 0:
@@ -63,6 +58,36 @@ def repetition_decode_soft(soft_bits, rep_factor=3):
     hard_bits = np.round(averaged_bits).astype(np.uint8)
     
     return hard_bits
+
+def calc_bit_accuracy(bytes_a, bytes_b):
+    """
+    計算兩個 bytes 對象之間的位元準確率 (Bit Accuracy)
+    """
+    # 轉為整數列表以便操作
+    arr_a = np.frombuffer(bytes_a, dtype=np.uint8)
+    arr_b = np.frombuffer(bytes_b, dtype=np.uint8)
+    
+    # 處理長度不一致 (取交集部分，多出的算錯)
+    min_len = min(len(arr_a), len(arr_b))
+    max_len = max(len(arr_a), len(arr_b))
+    
+    # 比較交集部分
+    # XOR 運算：相同為0，不同為1
+    xor_diff = arr_a[:min_len] ^ arr_b[:min_len]
+    
+    # 計算 XOR 結果中 '1' 的個數 (即錯誤的 bit 數)
+    # np.unpackbits 將 uint8 展開為 8 個 bit (0/1)
+    bit_diffs = np.unpackbits(xor_diff).sum()
+    
+    # 加上長度差異部分的 bit (全部視為錯誤)
+    len_diff_bytes = max_len - min_len
+    total_bit_errors = bit_diffs + (len_diff_bytes * 8)
+    
+    total_bits = max_len * 8
+    if total_bits == 0: return 100.0
+    
+    accuracy = (1 - (total_bit_errors / total_bits)) * 100.0
+    return accuracy
 
 def main():
     parser = argparse.ArgumentParser(description="Bob: 雙模態隱寫系統 - 圖像提取端 (Repetition(3) + RS(255, 119))")
@@ -90,8 +115,7 @@ def main():
     seed_shuffle = (opt.secret_key + 9527) % (2**32) 
     print(f"[Bob] 使用金鑰解密: {opt.secret_key}")
 
-    # === 2. 圖像反演 (DPM Inversion) (內容不變) ===
-    # ... (DPM Inversion 內容不變) ...
+    # === 2. 圖像反演 (DPM Inversion) ===
     init_image = load_img(opt.img_path).to(device)
     c = model.get_learned_conditioning([opt.prompt])
     uc = model.get_learned_conditioning([""]) if opt.scale != 1.0 else None
@@ -114,7 +138,6 @@ def main():
     # === 3. 解密訊息 (Soft Decoding) ===
     mapper = mapping_module.ours_mapping(bits=opt.bit_num)
     
-    # 【關鍵修正】: 調用我們新增的 soft decode 函數
     recovered_soft_array = mapper.decode_secret_soft(
         pred_noise=z_T_hat.cpu().numpy(),
         seed_kernel=seed_kernel,
@@ -127,7 +150,7 @@ def main():
     # 恢復 RS 碼的參數
     N_ECC_SYMBOLS = 136 
     N_DATA_BYTES_PER_BLOCK = 119
-    NUM_BLOCKS = 2 # 【關鍵修正】
+    NUM_BLOCKS = 2 
     BLOCK_SIZE = 255
     PAYLOAD_SIZE_BYTES = NUM_BLOCKS * N_DATA_BYTES_PER_BLOCK # 238 字節
     
@@ -143,7 +166,6 @@ def main():
     print(f"[Bob] 內層碼 (Repetition(3)) 已完成軟判決。")
 
     # --- [Step 2: Outer Code (RS Decode)] ---
-    # (此部分 RS 解碼邏輯與之前相同)
     rsc = RSCodec(N_ECC_SYMBOLS)
     bit_padding = (8 - (len(rs_coded_bits_fixed) % 8)) % 8
     if bit_padding == 8: bit_padding = 0
@@ -171,6 +193,7 @@ def main():
             repaired_bytes_list.append(repaired_chunk)
         except ReedSolomonError: 
             ecc_fail_count += 1
+            # 如果解碼失敗，保留原始（經過Repetition修正但RS失敗的）數據，以便計算 Bit Accuracy
             repaired_bytes_list.append(chunk[:N_DATA_BYTES_PER_BLOCK])
     
     print(f"[Bob] 外層碼 (RS(255, 119)) 修正了 {total_rs_fixed} 個字節錯誤。")
@@ -181,47 +204,39 @@ def main():
     final_repaired_bytes = final_repaired_bytes[:PAYLOAD_SIZE_BYTES] 
 
     # === 4. 驗證與輸出 ===
-    # 【關鍵修正】: 修改此部分以打印百分比
     secret_path = opt.img_path + ".original_secret.npy"
     if os.path.exists(secret_path):
         gt_bytes = np.load(secret_path).tobytes()
         
+        # 計算 Bit Accuracy
+        bit_acc = calc_bit_accuracy(final_repaired_bytes, gt_bytes)
+        
         if final_repaired_bytes == gt_bytes:
             print("="*30)
             print("🎉 驗證成功！資訊完整還原！")
-            # 添加一個可被 robust_eval_main.py 解析的特定輸出
-            print(f"📊 Payload Byte Accuracy: 100.00%")
+            # 輸出 Bit Accuracy 供 robust_eval_main.py 抓取
+            print(f"📊 Payload Bit Accuracy: 100.00%")
             print("="*30)
         else:
             total_bytes = len(gt_bytes)
-            if total_bytes == 0:
-                 mismatched_bytes = 0
-                 byte_accuracy = 100.0
-            else:
-                mismatched_bytes = sum(1 for a, b in zip(final_repaired_bytes, gt_bytes) if a != b)
-                # 確保長度一致
-                if len(final_repaired_bytes) != len(gt_bytes):
-                    print(f"⚠️ 警告: 恢復的字節長度 ({len(final_repaired_bytes)}) 與原始長度 ({len(gt_bytes)}) 不匹配。")
-                    # 以較短的為準來計算錯誤，避免 zip 提前停止
-                    min_len = min(len(final_repaired_bytes), len(gt_bytes))
-                    mismatched_bytes = sum(1 for i in range(min_len) if final_repaired_bytes[i] != gt_bytes[i])
-                    mismatched_bytes += abs(len(final_repaired_bytes) - len(gt_bytes))
-
-                correct_bytes = total_bytes - mismatched_bytes
-                byte_accuracy = (correct_bytes / total_bytes) * 100.0
+            mismatched_bytes = sum(1 for a, b in zip(final_repaired_bytes, gt_bytes) if a != b)
+            if len(final_repaired_bytes) != len(gt_bytes):
+                mismatched_bytes += abs(len(final_repaired_bytes) - len(gt_bytes))
             
+            # Byte Accuracy (僅供參考)
+            byte_accuracy = ((total_bytes - mismatched_bytes) / total_bytes) * 100.0 if total_bytes > 0 else 0.0
+
             print("="*30)
             print(f"❌ 驗證失敗：最終數據不匹配！")
             print(f"  - 總字節: {total_bytes}")
-            print(f"  - 錯誤字節: {mismatched_bytes}")
-            # 添加一個可被 robust_eval_main.py 解析的特定輸出
-            print(f"📊 Payload Byte Accuracy: {byte_accuracy:.2f}%")
+            print(f"  - 錯誤字節: {mismatched_bytes} (Byte Acc: {byte_accuracy:.2f}%)")
+            # 輸出 Bit Accuracy 供 robust_eval_main.py 抓取
+            print(f"📊 Payload Bit Accuracy: {bit_acc:.2f}%")
             print("="*30)
     else:
         print("✅ [Bob] 解密完成 (無原始檔可供比對)")
         print(f"⚠️ [Bob] 找不到驗證文件: {secret_path}")
-        # 即使找不到，也打印一個標記，讓主腳本知道發生了什麼
-        print(f"📊 Payload Byte Accuracy: N/A (No Ground Truth)")
+        print(f"📊 Payload Bit Accuracy: N/A (No Ground Truth)")
 
 if __name__ == "__main__":
     main()
