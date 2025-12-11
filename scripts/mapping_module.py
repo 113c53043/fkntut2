@@ -1,3 +1,4 @@
+
 import torch
 import numpy as np
 from scipy.linalg import qr
@@ -198,4 +199,5 @@ if __name__ == '__main__':
     # print(f._compute_acc(secret, secret_recon))
     
     # ... (其餘原始的 if __name__ == '__main__' 測試代碼) ...
-    pass # 添加 pass 以確保文件結構完整
+    pass # 添加 pass 以確保文件結構完整 
+   
